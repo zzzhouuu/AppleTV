@@ -1,0 +1,184 @@
+name: 生成Apple TV直播列表
+
+on:
+  push:
+    branches:
+      - main
+    path:
+      - ".github/workflows/Update.yml"
+  release:
+    types: [published]
+  schedule:
+    - cron: 0 4,16 * * *
+  watch:
+    types: [started]
+
+env:
+  TZ: Asia/Shanghai
+  SOURCE: https://raw.githubusercontent.com/lamdow8/lamdow8.github.io/master/list.txt
+  SOURCE_NAME: source.tmp
+  CCTV_KEYWORD: 江西宜春
+  SATT_KEYWORD: 江西宜春
+  GROUP_NAME_CCTV: 央视频道
+  GROUP_NAME_SATT: 卫视频道
+  GROUP_NAME_HK: 香港频道
+  GROUP_NAME_TW: 台湾频道
+  GROUP_NAME_MO: 澳门频道
+
+jobs:
+  GenerateList:
+    if: github.event.repository.owner.id == github.event.sender.id
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: main
+          fetch-depth: 0
+          lfs: true
+
+      - name: 获取当前日期
+        id: date
+        run: echo "::set-output name=DATE::$(date +'%Y-%m-%d')"
+
+      - name: 获取最新源
+        run: |
+          wget $SOURCE -O $SOURCE_NAME
+
+      - name: 央视频道
+        run: |
+          # 从指定行打印到指定空行
+          awk 'BEGIN{i=1;isExist=0} /央视频道,/,/卫视频道,/ {
+            if($0~/'"$CCTV_KEYWORD"'/) {
+              if(isExist==0) {printf("\n")};
+              isExist=1;
+              print $0;
+            }
+            if(isExist==1 && length($0)==0) {exit};
+          }
+          ' $SOURCE_NAME > cctv.tmp
+
+          # 分行输出
+          awk -F, '
+          {
+            gsub(" HD","");
+            gsub(/\$.*/,"");
+            name=$1;
+            url=$2;
+            print name "\n" url;
+          }
+          ' cctv.tmp > ChannelSource/CCTV.m3u
+
+          # 匹配EPG信息
+          awk -F'"' '
+          {
+            info=$0;
+            name=$4;
+            print info;
+            gsub(/group-title=\"..央视.*\"/, "group-title=\"'"$GROUP_NAME_CCTV"'\"");
+            if(info~/卫视频道标清/) {exit};
+            if(info~/综合/) {
+              name="综合";
+              close("ChannelSource/CCTV.m3u");
+              cmd="awk '\''/"name"/{getline;print}'\'' ChannelSource/CCTV.m3u";
+              cmd | getline churl;
+              print churl;
+              close(cmd);
+              next;
+            };
+            if(info~/体育赛事/) {
+              name="体育赛事";
+              close("ChannelSource/CCTV.m3u");
+              cmd="awk '\''/"name"/{getline;print}'\'' ChannelSource/CCTV.m3u";
+              cmd | getline churl;
+              print churl;
+              close(cmd);
+              next;
+            };
+            if(info~/EXTINF/ && info!~/奥林匹克|超高清/) {
+              close("ChannelSource/CCTV.m3u");
+              cmd="awk '\''/"name"/{getline;print}'\'' ChannelSource/CCTV.m3u";
+              cmd | getline churl;
+              print churl;
+              close(cmd);
+            };
+          }
+          ' ChannelList/CCTV.list > CCTV.m3u
+
+      - name: 卫视频道
+        run: |
+          # 从指定行打印到指定空行
+          awk 'BEGIN{i=1;isExist=0} /卫视频道,/,/香港频道,/ {
+            if($0~/'"$SATT_KEYWORD"'/) {
+              if(isExist==0) {printf("\n")};
+              isExist=1;
+              print $0;
+            };
+            if(isExist==1 && length($0)==0) {exit};
+          }
+          ' $SOURCE_NAME > satt.tmp
+
+          # 分行输出
+          awk -F, '
+          {
+            gsub(" HD","");
+            gsub(/\$.*/,"");
+            name=$1;
+            url=$2;
+            print name "\n" url;
+          }
+          ' satt.tmp > ChannelSource/SATT.m3u
+
+          # 匹配EPG信息
+          awk -F'"' '
+          {
+            info=$0;
+            name=$4;
+            print info;
+            gsub(/group-title=\"..卫视.*\"/, "group-title=\"'"$GROUP_NAME_SATT"'\"");
+            if(info~/EXTINF/) {
+              close("ChannelSource/SATT.m3u");
+              cmd="awk '\''/"name"/{getline;print}'\'' ChannelSource/SATT.m3u";
+              cmd | getline churl;
+              print churl;
+              close(cmd);
+            };
+          }
+          ' ChannelList/SATT.list > SATT.m3u
+
+      - name: 删除临时文件
+        run: |
+          rm $SOURCE_NAME
+          rm *.tmp
+          ls
+
+      - name: 判断是否有变更
+        id: status
+        run: |
+          STR1="nothing to commit, working tree clean"
+          STR2="Changes not staged for commit"
+          out=$(git status)
+          if [[ "$(echo $out | grep "$STR1")" != "" ]]
+          then
+            echo "::set-output name=STATUS::"nochange""
+          fi
+          if [[ "$(echo $out | grep "$STR2")" != "" ]]
+          then
+            echo "::set-output name=STATUS::"change""
+          fi
+
+      - name: 合并到仓库
+        run: |
+          if [[ "${{steps.status.outputs.STATUS}}" == "change" ]]
+          then
+            git add .
+            git commit -m  "Update:${{steps.date.outputs.DATE}}"
+            git push origin main
+          fi
+
+      - name: 移除workflow运行
+        uses: GitRML/delete-workflow-runs@main
+        with:
+          retain_days: 1
+          keep_minimum_runs: 3
